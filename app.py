@@ -1,10 +1,8 @@
 import io
-import json
 import os
 import pickle
 import pandas as pd
 import streamlit as st
-import google.generativeai as genai
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches, Pt, RGBColor
@@ -30,27 +28,6 @@ CATEGORIAS = [
     "Cursos e Impartición de Clases",
     "Premios y Reconocimientos",
 ]
-
-ESTILOS_DISENOS = {
-    "Azul Ejecutivo": {
-        "fuente": "Calibri",
-        "color_titulo": RGBColor(0, 51, 102),     # Azul Marino
-        "color_sub": RGBColor(100, 100, 100),    # Gris Medio
-        "color_cat": RGBColor(0, 51, 102),
-    },
-    "Académico Clásico": {
-        "fuente": "Times New Roman",
-        "color_titulo": RGBColor(102, 0, 0),     # Tinto / Guinda Académico
-        "color_sub": RGBColor(80, 80, 80),
-        "color_cat": RGBColor(102, 0, 0),
-    },
-    "Minimalista": {
-        "fuente": "Arial",
-        "color_titulo": RGBColor(40, 40, 40),     # Gris Oscuro
-        "color_sub": RGBColor(120, 120, 120),
-        "color_cat": RGBColor(40, 40, 40),
-    }
-}
 
 # ----------------------------------------------------
 # FUNCIONES DE CONEXIÓN CON GOOGLE DRIVE API
@@ -153,7 +130,7 @@ def actualizar_excel_drive(service, file_id, df):
 
 
 # ----------------------------------------------------
-# FUNCIONES AUXILIARES
+# FUNCIONES AUXILIARES Y GENERACIÓN DE WORD
 # ----------------------------------------------------
 def limpiar_texto(val):
     """Limpia textos vacíos, descarte de palabras basura o valores no deseados."""
@@ -184,77 +161,9 @@ def formatear_fecha_cv(row):
     return ""
 
 
-# ----------------------------------------------------
-# PROCESAMIENTO E INTELIGENCIA ARTIFICIAL (GEMINI API)
-# ----------------------------------------------------
-def procesar_cv_con_gemini(df_cv, objetivo, api_key):
-    """Envía los registros académicos a Gemini para curación y redacción fina."""
-    try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-2.5-flash")
-
-        # Convertir datos relevantes a lista de diccionarios
-        registros = []
-        for _, row in df_cv.iterrows():
-            registros.append({
-                "Año": str(row.get("Año", "")),
-                "Categoría": limpiar_texto(row.get("Categoría_CV") or row.get("Categoría")),
-                "Título": limpiar_texto(row.get("Título_Actividad_o_Publicación") or row.get("Título")),
-                "Rol": limpiar_texto(row.get("Rol_Participación")),
-                "Institución": limpiar_texto(row.get("Institución_Organización") or row.get("Institución")),
-                "Lugar": limpiar_texto(row.get("Lugar_Sede")),
-            })
-
-        prompt = f"""
-        Actúa como un experto consultor editorial y curricular académico universitario de alto nivel.
-        Estás elaborando el Currículum Vitae oficial de la Dra. María Griselda Günther.
-
-        OBJETIVO DEL CV: "{objetivo}"
-        DATOS DE ORIGEN:
-        {json.dumps(registros, ensure_ascii=False, indent=2)}
-
-        INSTRUCCIONES:
-        1. Selecciona y curadoramente filtra las actividades de la Dra. que mejor se alineen al objetivo "{objetivo}".
-        2. Mejora la redacción académica de cada título, rol e institución (corrige faltas de ortografía, capitalización y redacción formal).
-        3. Escribe una breve **Síntesis / Perfil Profesional Ejecutivo** de 1 párrafo (máximo 5 líneas) introductorio adaptado al objetivo seleccionado.
-        4. Agrupa los ítems en categorías claras.
-
-        Responde ÚNICAMENTE en formato JSON válido con la siguiente estructura:
-        {{
-            "subtitulo_cv": "SÍNTESIS EJECUTIVA / EVALUACIÓN ACADÉMICA",
-            "perfil_ejecutivo": "Texto del párrafo de perfil introductorio...",
-            "secciones": [
-                {{
-                    "categoria": "Nombre de la Categoría",
-                    "items": [
-                        {{
-                            "titulo": "Título estilizado y corregido",
-                            "detalles": "Rol, Institución, Sede, Año/Fecha formateados de forma impecable."
-                        }}
-                    ]
-                }}
-            ]
-        }}
-        """
-
-        response = model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"}
-        )
-        return json.loads(response.text)
-
-    except Exception as e:
-        st.error(f"Error al procesar con la IA: {e}")
-        return None
-
-
-# ----------------------------------------------------
-# GENERADOR DE WORD (.DOCX) CON PLANTILLA
-# ----------------------------------------------------
-def crear_cv_word_desde_json(datos_ia, nombre_estilo="Azul Ejecutivo"):
-    """Genera el Word maquetado profesionalmente a partir del JSON estructurado por Gemini."""
+def crear_cv_word(df):
+    """Genera el documento Word del CV con formato académico limpio, ejecutivo y organizado."""
     doc = Document()
-    estilo_cfg = ESTILOS_DISENOS.get(nombre_estilo, ESTILOS_DISENOS["Azul Ejecutivo"])
 
     # Márgenes de página profesionales (2.5 cm)
     for section in doc.sections:
@@ -265,109 +174,31 @@ def crear_cv_word_desde_json(datos_ia, nombre_estilo="Azul Ejecutivo"):
 
     # Estilo base
     style_normal = doc.styles["Normal"]
-    style_normal.font.name = estilo_cfg["fuente"]
+    style_normal.font.name = "Calibri"
     style_normal.font.size = Pt(11)
 
-    # Encabezado: Nombre
+    # Encabezado: Nombre de la Dra.
     p_titulo = doc.add_paragraph()
     p_titulo.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p_titulo.paragraph_format.space_after = Pt(2)
+    p_titulo.paragraph_format.space_before = Pt(0)
 
     run_nombre = p_titulo.add_run("DRA. MARÍA GRISELDA GÜNTHER")
     run_nombre.bold = True
     run_nombre.font.size = Pt(16)
-    run_nombre.font.color.rgb = estilo_cfg["color_titulo"]
+    run_nombre.font.color.rgb = RGBColor(0, 51, 102)  # Azul Marino
 
     # Subtítulo
-    subtitulo_texto = datos_ia.get("subtitulo_cv", "CURRÍCULUM VITAE").upper()
-    p_sub = doc.add_paragraph()
-    p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p_sub.paragraph_format.space_after = Pt(14)
-
-    run_sub = p_sub.add_run(f"— {subtitulo_texto} —")
-    run_sub.font.size = Pt(10.5)
-    run_sub.font.italic = True
-    run_sub.font.color.rgb = estilo_cfg["color_sub"]
-
-    # Perfil Ejecutivo
-    perfil = datos_ia.get("perfil_ejecutivo", "")
-    if perfil:
-        p_perfil = doc.add_paragraph()
-        p_perfil.paragraph_format.space_after = Pt(14)
-        p_perfil.paragraph_format.line_spacing = 1.15
-        run_p = p_perfil.add_run(perfil)
-        run_p.font.italic = True
-
-    # Secciones
-    for sec in datos_ia.get("secciones", []):
-        cat_nombre = sec.get("categoria", "")
-        items = sec.get("items", [])
-
-        if not items:
-            continue
-
-        p_cat = doc.add_paragraph()
-        p_cat.paragraph_format.space_before = Pt(14)
-        p_cat.paragraph_format.space_after = Pt(6)
-        p_cat.paragraph_format.keep_with_next = True
-
-        run_cat = p_cat.add_run(cat_nombre)
-        run_cat.bold = True
-        run_cat.font.size = Pt(12.5)
-        run_cat.font.color.rgb = estilo_cfg["color_cat"]
-
-        for item in items:
-            titulo_item = item.get("titulo", "")
-            detalles_item = item.get("detalles", "")
-
-            p_item = doc.add_paragraph(style="List Bullet")
-            p_item.paragraph_format.space_after = Pt(4)
-            p_item.paragraph_format.line_spacing = 1.15
-
-            if titulo_item:
-                r_t = p_item.add_run(titulo_item)
-                r_t.bold = True
-            if detalles_item:
-                if titulo_item:
-                    p_item.add_run(". ")
-                p_item.add_run(detalles_item)
-
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer
-
-
-def crear_cv_word_tradicional(df, nombre_estilo="Azul Ejecutivo"):
-    """Genera el CV en Word de forma directa (Sin procesamiento de IA)."""
-    doc = Document()
-    estilo_cfg = ESTILOS_DISENOS.get(nombre_estilo, ESTILOS_DISENOS["Azul Ejecutivo"])
-
-    for section in doc.sections:
-        section.top_margin = Inches(1)
-        section.bottom_margin = Inches(1)
-        section.left_margin = Inches(1)
-        section.right_margin = Inches(1)
-
-    style_normal = doc.styles["Normal"]
-    style_normal.font.name = estilo_cfg["fuente"]
-    style_normal.font.size = Pt(11)
-
-    p_titulo = doc.add_paragraph()
-    p_titulo.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run_nombre = p_titulo.add_run("DRA. MARÍA GRISELDA GÜNTHER")
-    run_nombre.bold = True
-    run_nombre.font.size = Pt(16)
-    run_nombre.font.color.rgb = estilo_cfg["color_titulo"]
-
     p_sub = doc.add_paragraph()
     p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p_sub.paragraph_format.space_after = Pt(16)
-    run_sub = p_sub.add_run("CURRÍCULUM VITAE — SÍNTESIS GENERAL")
+
+    run_sub = p_sub.add_run("CURRÍCULUM VITAE — SÍNTESIS EJECUTIVA")
     run_sub.font.size = Pt(10.5)
     run_sub.font.italic = True
-    run_sub.font.color.rgb = estilo_cfg["color_sub"]
+    run_sub.font.color.rgb = RGBColor(100, 100, 100)
 
+    # Filtrar solo actividades aprobadas para el CV
     col_incluir = "Incluir_en_CV" if "Incluir_en_CV" in df.columns else df.columns[0]
     df_cv = df[df[col_incluir].astype(str).str.strip().str.lower() == "sí"].copy()
     
@@ -384,13 +215,16 @@ def crear_cv_word_tradicional(df, nombre_estilo="Azul Ejecutivo"):
             if sub_df.empty:
                 continue
 
+            # Encabezado de la Categoría
             p_cat = doc.add_paragraph()
             p_cat.paragraph_format.space_before = Pt(14)
             p_cat.paragraph_format.space_after = Pt(6)
+            p_cat.paragraph_format.keep_with_next = True
+
             run_cat = p_cat.add_run(cat)
             run_cat.bold = True
             run_cat.font.size = Pt(12.5)
-            run_cat.font.color.rgb = estilo_cfg["color_cat"]
+            run_cat.font.color.rgb = RGBColor(0, 51, 102)
 
             for _, row in sub_df.iterrows():
                 titulo = limpiar_texto(row.get("Título_Actividad_o_Publicación") or row.get("Título"))
@@ -404,13 +238,16 @@ def crear_cv_word_tradicional(df, nombre_estilo="Azul Ejecutivo"):
 
                 p_item = doc.add_paragraph(style="List Bullet")
                 p_item.paragraph_format.space_after = Pt(4)
+                p_item.paragraph_format.space_before = Pt(0)
+                p_item.paragraph_format.line_spacing = 1.15
+
                 if titulo:
                     run_t = p_item.add_run(titulo)
                     run_t.bold = True
 
                 detalles = []
                 if rol:
-                    detalles.append(f"Rol: {rol}" if not rol.lower().startswith("rol") else rol)
+                    detalles.append(rol if rol.lower().startswith(("rol", "participación")) else f"Rol: {rol}")
                 if inst:
                     detalles.append(inst)
                 if lugar:
@@ -460,7 +297,7 @@ if service:
             [
                 "🔍 Buscar y Consultar Probatorios",
                 "➕ Registrar Nueva Actividad",
-                "📄 Generar CV Personalizado con IA",
+                "📄 Generar CV en Word",
             ]
         )
 
@@ -580,78 +417,35 @@ if service:
                         st.rerun()
 
         # ----------------------------------------------------
-        # PESTAÑA 3: GENERADOR DE CV INTELIGENTE EN WORD
+        # PESTAÑA 3: GENERADOR DE CV EN WORD
         # ----------------------------------------------------
         with tab_cv_word:
-            st.subheader("📄 Generador de CV Adaptativo con IA")
-            st.write("Genera un documento en Word (.docx) perfectamente redactado y diseñado a la medida según el trámite o evaluación académica.")
+            st.subheader("📄 Generador Automático de CV impreso (Word)")
+            st.write("Este módulo compila automáticamente todas las actividades marcadas con **'¿Incluir en el CV? = Sí'**, formateadas en estilo académico profesional.")
 
             col_inc = "Incluir_en_CV" if "Incluir_en_CV" in df.columns else df.columns[0]
             df_cv_aprobados = df[df[col_inc].astype(str).str.strip().str.lower() == "sí"]
 
-            col_c1, col_c2 = st.columns(2)
+            col_w1, col_w2 = st.columns([2, 1])
 
-            with col_c1:
-                objetivo_cv = st.selectbox(
-                    "🎯 Objetivo del CV (Perfil)",
-                    [
-                        "Síntesis Ejecutiva (Resumen de 2 Páginas)",
-                        "Evaluación SNI / CONAHCYT (Enfoque Investigación / Publicaciones)",
-                        "Perfil Institucional UAM (Docencia, Comisiones y Gestión)",
-                        "Semblanza Curricular Narrativa (Para Congresos o Presentaciones)"
-                    ]
-                )
+            with col_w1:
+                st.info(f"📌 Actualmente hay **{len(df_cv_aprobados)} actividades** listas para incluirse en el currículum.")
 
-                estilo_cv = st.selectbox(
-                    "🎨 Estilo Visual y Paleta",
-                    list(ESTILOS_DISENOS.keys())
-                )
+            with col_w2:
+                if not df_cv_aprobados.empty:
+                    archivo_word_bytes = crear_cv_word(df)
 
-            with col_c2:
-                usar_ia = st.toggle("🤖 Optimizar y redactar con IA (Gemini)", value=True)
-
-                api_key_input = ""
-                if usar_ia:
-                    # Intentar obtener la API key desde Secrets de Streamlit
-                    api_key_env = st.secrets.get("GEMINI_API_KEY", "") if "GEMINI_API_KEY" in st.secrets else os.getenv("GEMINI_API_KEY", "")
-                    
-                    if api_key_env:
-                        api_key_input = api_key_env
-                        st.success("🔑 Llave de Gemini API detectada correctamente.")
-                    else:
-                        api_key_input = st.text_input("Ingresa tu Gemini API Key:", type="password", help="Obtén tu clave gratis en Google AI Studio")
-
-            st.markdown("---")
-
-            if st.button("🚀 Generar Currículum en Word", type="primary"):
-                if df_cv_aprobados.empty:
-                    st.warning("⚠️ No hay actividades marcadas con 'Incluir en CV = Sí' en la base de datos.")
+                    st.download_button(
+                        label="📥 Descargar CV Actualizado (.docx)",
+                        data=archivo_word_bytes,
+                        file_name="CV_Dra_Maria_Griselda_Gunther.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
                 else:
-                    buffer_word = None
-
-                    if usar_ia:
-                        if not api_key_input:
-                            st.error("⚠️ Por favor ingresa una API Key válida de Gemini para utilizar la redacción inteligente.")
-                        else:
-                            with st.spinner("🤖 La IA está analizando los méritos, mejorando la redacción y maquetando el documento..."):
-                                json_cv = procesar_cv_con_gemini(df_cv_aprobados, objetivo_cv, api_key_input)
-                                if json_cv:
-                                    buffer_word = crear_cv_word_desde_json(json_cv, estilo_cv)
-                                    st.success("✨ ¡CV procesado y formateado con éxito por la IA!")
-                    else:
-                        with st.spinner("Generando documento Word..."):
-                            buffer_word = crear_cv_word_tradicional(df, estilo_cv)
-                            st.success("✨ Documento generado correctamente (Modo Tradicional).")
-
-                    if buffer_word:
-                        st.download_button(
-                            label="📥 Descargar CV (.docx)",
-                            data=buffer_word,
-                            file_name=f"CV_Dra_Gunther_{objetivo_cv.split()[0]}.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        )
+                    st.warning("No hay registros marcados con 'Incluir en CV = Sí'.")
 
             st.markdown("---")
-            st.markdown("##### 👁️ Actividades que se considerarán:")
+            st.markdown("##### 👁️ Vista previa de los datos que se incluirán:")
+            
             columnas_preview = [c for c in ["Año", "Categoría_CV", "Categoría", "Título_Actividad_o_Publicación", "Título", "Rol_Participación", "Institución_Organización", "Institución"] if c in df_cv_aprobados.columns]
             st.dataframe(df_cv_aprobados[columnas_preview], use_container_width=True)
