@@ -41,7 +41,7 @@ def get_drive_service():
 
 
 def find_excel_file_in_drive(service):
-    """Busca el archivo Excel probando coincidencias flexibles y devuelve lista de visibles"""
+    """Busca el archivo Excel probando coincidencia flexible"""
     try:
         results = service.files().list(
             q="trashed = false",
@@ -49,7 +49,6 @@ def find_excel_file_in_drive(service):
         ).execute()
         files = results.get('files', [])
         
-        # 1. Buscar coincidencia que contenga el nombre de la base de datos
         for f in files:
             if "Base_de_Datos_Probatorios_y_CV" in f['name']:
                 return f['id'], f['name'], files
@@ -111,23 +110,29 @@ st.subheader("Dra. Gunther — UAM Xochimilco")
 service = get_drive_service()
 
 if service:
-    # Buscar el archivo en Google Drive de forma inteligente
     excel_id, found_name, all_files = find_excel_file_in_drive(service)
     
     if not excel_id:
-        st.warning("⚠️ No se encontró la base de datos en Google Drive.")
+        st.warning("⚠️ No se encontró la base de datos en el Google Drive conectado.")
+        st.info("💡 **Solución fácil:** Sube tu archivo Excel aquí abajo una sola vez y la aplicación lo colocarán en el Drive correcto por ti.")
         
-        st.markdown("---")
-        st.markdown("### 🔍 Diagnóstico de archivos visibles en tu Google Drive:")
-        if all_files:
-            st.info(f"La app tiene acceso a tu Drive y detecta estos **{len(all_files)}** archivos:")
-            for f in all_files:
-                st.write(f"📄 **Nombre:** `{f['name']}` | **ID:** `{f['id']}`")
-            st.caption("Asegúrate de que el archivo Excel subido contenga en su nombre 'Base_de_Datos_Probatorios_y_CV'.")
-        else:
-            st.error("La app no detecta ningún archivo en esa cuenta de Google Drive.")
-            st.info("Revisa haber subido el Excel a la cuenta de Google Drive con la que vinculaste la aplicación.")
-            
+        # Botón directo para vincular el archivo
+        archivo_excel_nuevo = st.file_uploader(
+            "Selecciona el archivo 'Base_de_Datos_Probatorios_y_CV.xlsx' de tu computadora:", 
+            type=["xlsx"]
+        )
+        
+        if archivo_excel_nuevo is not None:
+            with st.spinner("Vinculando y guardando Excel en Google Drive..."):
+                file_metadata = {'name': 'Base_de_Datos_Probatorios_y_CV.xlsx'}
+                media = MediaIoBaseUpload(
+                    io.BytesIO(archivo_excel_nuevo.getvalue()), 
+                    mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                )
+                service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+                st.success("¡Base de datos guardada y vinculada con éxito!")
+                st.rerun()
+                
     else:
         st.success(f" Conectado exitosamente a la base de datos: `{found_name}`")
         
@@ -143,7 +148,6 @@ if service:
         with tab1:
             st.markdown("### 📋 Registro General de Actividades")
             
-            # Filtro por categoría si existe la columna
             if 'Categoría' in df.columns:
                 categorias = ["Todas"] + list(df['Categoría'].dropna().unique())
                 cat_seleccionada = st.selectbox("Filtrar por Categoría:", categorias)
@@ -155,7 +159,6 @@ if service:
             else:
                 df_filtrado = df
             
-            # Buscador por palabra clave
             busqueda = st.text_input("🔎 Buscar en cualquier campo:")
             if busqueda:
                 mask = df_filtrado.astype(str).apply(lambda x: x.str.contains(busqueda, case=False)).any(axis=1)
@@ -169,7 +172,7 @@ if service:
         # -----------------------------------------------------
         with tab2:
             st.markdown("### 📝 Registrar Nueva Actividad / Constancia")
-            st.write("Llena los datos del probatorio. El documento se guardará automáticamente en tu Google Drive.")
+            st.write("Llena los datos del probatorio. El documento se guardará automáticamente en Google Drive.")
             
             with st.form("form_nueva_constancia", clear_on_submit=True):
                 col1, col2 = st.columns(2)
