@@ -34,22 +34,30 @@ def get_drive_service():
             return None
             
     if not creds:
-        st.error("No se encontró el archivo de sesión 'token.pickle'.")
+        st.error("No se encontró el archivo de sesión 'token.pickle' en el proyecto.")
         return None
         
     return build('drive', 'v3', credentials=creds)
 
 
-def get_excel_file_id(service, file_name="Base_de_Datos_Probatorios_y_CV.xlsx"):
-    """Busca el archivo Excel en Google Drive por su nombre"""
-    results = service.files().list(
-        q=f"name = '{file_name}' and trashed = false",
-        fields="files(id, name)"
-    ).execute()
-    items = results.get('files', [])
-    if items:
-        return items[0]['id']
-    return None
+def find_excel_file_in_drive(service):
+    """Busca el archivo Excel probando coincidencias flexibles y devuelve lista de visibles"""
+    try:
+        results = service.files().list(
+            q="trashed = false",
+            fields="files(id, name, mimeType)"
+        ).execute()
+        files = results.get('files', [])
+        
+        # 1. Buscar coincidencia que contenga el nombre de la base de datos
+        for f in files:
+            if "Base_de_Datos_Probatorios_y_CV" in f['name']:
+                return f['id'], f['name'], files
+                
+        return None, None, files
+    except Exception as e:
+        st.error(f"Error al consultar la API de Google Drive: {e}")
+        return None, None, []
 
 
 def load_data_from_drive(service, file_id):
@@ -69,11 +77,9 @@ def upload_pdf_to_drive(service, uploaded_file):
     file_metadata = {'name': uploaded_file.name}
     media = MediaIoBaseUpload(io.BytesIO(uploaded_file.getvalue()), mimetype=uploaded_file.type)
     
-    # Crear archivo en Drive
     file = service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
     file_id = file.get('id')
     
-    # Hacer el archivo accesible para lectura pública mediante enlace
     service.permissions().create(
         fileId=file_id,
         body={'type': 'anyone', 'role': 'reader'}
@@ -102,17 +108,29 @@ def update_excel_in_drive(service, file_id, df):
 st.title("📚 Sistema de Gestión de CV y Probatorios")
 st.subheader("Dra. Gunther — UAM Xochimilco")
 
-# Inicializar servicio de Google Drive
 service = get_drive_service()
 
 if service:
-    # Obtener el ID del Excel en Drive
-    excel_id = get_excel_file_id(service)
+    # Buscar el archivo en Google Drive de forma inteligente
+    excel_id, found_name, all_files = find_excel_file_in_drive(service)
     
     if not excel_id:
-        st.warning("⚠️ No se encontró el archivo 'Base_de_Datos_Probatorios_y_CV.xlsx' en tu Google Drive.")
-        st.info("Asegúrate de haber subido el archivo Excel a la cuenta de Google Drive asociada.")
+        st.warning("⚠️ No se encontró la base de datos en Google Drive.")
+        
+        st.markdown("---")
+        st.markdown("### 🔍 Diagnóstico de archivos visibles en tu Google Drive:")
+        if all_files:
+            st.info(f"La app tiene acceso a tu Drive y detecta estos **{len(all_files)}** archivos:")
+            for f in all_files:
+                st.write(f"📄 **Nombre:** `{f['name']}` | **ID:** `{f['id']}`")
+            st.caption("Asegúrate de que el archivo Excel subido contenga en su nombre 'Base_de_Datos_Probatorios_y_CV'.")
+        else:
+            st.error("La app no detecta ningún archivo en esa cuenta de Google Drive.")
+            st.info("Revisa haber subido el Excel a la cuenta de Google Drive con la que vinculaste la aplicación.")
+            
     else:
+        st.success(f" Conectado exitosamente a la base de datos: `{found_name}`")
+        
         # Cargar datos
         df = load_data_from_drive(service, excel_id)
         
@@ -162,7 +180,7 @@ if service:
                     ano = st.number_input("Año *", min_value=1970, max_value=2030, value=2026)
                 
                 with col2:
-                    institucion = st.text_input("Institución / Entidad Organización")
+                    institucion = st.text_input("Institución / Entidad Organizadora")
                     detalles = st.text_area("Detalles / Observaciones opcionales")
                     archivo_pdf = st.file_uploader("Adjuntar Constancia o PDF Probatorio", type=["pdf", "png", "jpg", "jpeg"])
                 
@@ -175,11 +193,9 @@ if service:
                         with st.spinner("Subiendo archivo a Google Drive y actualizando la base de datos..."):
                             link_drive = "Sin probatorio"
                             
-                            # 1. Subir archivo a Drive si se adjuntó
                             if archivo_pdf is not None:
                                 link_drive = upload_pdf_to_drive(service, archivo_pdf)
                             
-                            # 2. Armar nueva fila para el DataFrame
                             nueva_fila = {
                                 'Título': titulo,
                                 'Categoría': categoria,
@@ -189,17 +205,14 @@ if service:
                                 'Enlace_Probatorio': link_drive
                             }
                             
-                            # Agregar columnas faltantes si el Excel tiene más campos
                             for col in df.columns:
                                 if col not in nueva_fila:
                                     nueva_fila[col] = ""
                                     
-                            # Convertir a DataFrame y concatenar
                             df_nuevo_registro = pd.DataFrame([nueva_fila])
                             df_actualizado = pd.concat([df, df_nuevo_registro], ignore_index=True)
                             
-                            # 3. Guardar cambios de vuelta en Google Drive
                             update_excel_in_drive(service, excel_id, df_actualizado)
                             
-                            st.success("¡Registro guardado con éxito! El Excel y Google Drive ya han sido actualizados.")
+                            st.success("¡Registro guardado con éxito! Google Drive ya ha sido actualizado.")
                             st.balloons()
