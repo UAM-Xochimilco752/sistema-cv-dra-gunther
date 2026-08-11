@@ -27,6 +27,7 @@ CATEGORIAS = [
     "Comisiones y Arbitrajes",
     "Cursos e Impartición de Clases",
     "Premios y Reconocimientos",
+    "Asesorías",
 ]
 
 # ----------------------------------------------------
