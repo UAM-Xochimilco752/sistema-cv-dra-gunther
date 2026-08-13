@@ -28,7 +28,7 @@ CATEGORIAS = [
     "Capítulos de Libros / Artículos",
     "Ponencias y Conferencias",
     "Presentaciones de Libros",
-    "Comisiones y Arbitrajes",
+    "Comisiones",
     "Cursos e Impartición de Clases",
     "Premios y Reconocimientos",
     "Asesorías",
