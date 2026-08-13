@@ -2,6 +2,7 @@ import io
 import os
 import pickle
 import mimetypes
+import re
 
 import pandas as pd
 import streamlit as st
@@ -570,6 +571,130 @@ def crear_cv_word(df):
     return buffer
 
 
+
+# ----------------------------------------------------
+# FUNCIONES PARA EDITAR / ELIMINAR REGISTROS
+# ----------------------------------------------------
+def siguiente_id_registro(df):
+    """
+    Genera el siguiente ID ACT-XXX disponible.
+    No depende de len(df), por lo que sigue funcionando
+    aunque se hayan eliminado registros.
+    """
+    numeros = []
+
+    if "ID" in df.columns:
+        for valor in df["ID"].dropna().astype(str):
+            match = re.fullmatch(r"ACT-(\d+)", valor.strip(), re.IGNORECASE)
+            if match:
+                numeros.append(int(match.group(1)))
+
+    siguiente = max(numeros, default=0) + 1
+    return f"ACT-{siguiente:03d}"
+
+
+def eliminar_archivo_drive(service, archivo_id):
+    """Envía un archivo de Google Drive a la papelera."""
+    if not archivo_id or not str(archivo_id).strip():
+        return True
+
+    try:
+        service.files().update(
+            fileId=str(archivo_id).strip(),
+            body={"trashed": True},
+        ).execute()
+        return True
+    except Exception as e:
+        st.error(f"Error al enviar el probatorio a la papelera: {e}")
+        return False
+
+
+def mover_archivo_drive(service, archivo_id, carpeta_destino):
+    """
+    Mueve un archivo existente a una carpeta nueva.
+    Esto permite que, si se edita el año o la categoría,
+    el probatorio siga correspondiendo con el registro.
+    """
+    if not archivo_id or not carpeta_destino:
+        return True
+
+    try:
+        archivo = service.files().get(
+            fileId=str(archivo_id).strip(),
+            fields="parents",
+        ).execute()
+
+        padres_actuales = archivo.get("parents", [])
+
+        service.files().update(
+            fileId=str(archivo_id).strip(),
+            addParents=carpeta_destino["id"],
+            removeParents=",".join(padres_actuales) if padres_actuales else None,
+            fields="id, parents",
+        ).execute()
+
+        return True
+
+    except Exception as e:
+        st.error(f"Error al mover el probatorio dentro de Google Drive: {e}")
+        return False
+
+
+def renombrar_archivo_drive(service, archivo_id, nuevo_nombre):
+    """Cambia el nombre de un archivo existente en Google Drive."""
+    if not archivo_id or not nuevo_nombre:
+        return True
+
+    try:
+        service.files().update(
+            fileId=str(archivo_id).strip(),
+            body={"name": nuevo_nombre},
+        ).execute()
+        return True
+    except Exception as e:
+        st.error(f"Error al renombrar el probatorio en Google Drive: {e}")
+        return False
+
+
+def nombre_probatorio(titulo, anio, categoria, extension):
+    """Construye un nombre limpio y consistente para un probatorio."""
+    titulo_limpio = "".join(
+        x for x in str(titulo)
+        if x.isalnum() or x in " _-"
+    ).strip()
+
+    titulo_limpio = titulo_limpio[:80] or "Sin_Titulo"
+
+    return (
+        f"{anio}_"
+        f"{str(categoria).replace(' ', '_')}_"
+        f"{titulo_limpio}"
+        f"{extension.lower()}"
+    )
+
+
+def valor_fila(row, columna, default=""):
+    """Obtiene un valor de una fila sin producir problemas con NaN."""
+    if columna not in row.index:
+        return default
+
+    valor = row[columna]
+
+    if pd.isna(valor):
+        return default
+
+    return valor
+
+
+def guardar_dataframe_drive(service, excel_id, df_actualizado):
+    """Guarda el DataFrame completo en el Excel de Google Drive."""
+    actualizar_excel_drive(
+        service,
+        excel_id,
+        df_actualizado,
+    )
+
+
 # ----------------------------------------------------
 # INTERFAZ PRINCIPAL (STREAMLIT)
 # ----------------------------------------------------
@@ -586,10 +711,7 @@ if service:
         estructura_drive = inicializar_estructura_drive(service)
 
     if estructura_drive:
-        st.success(
-            "☁️ Estructura de carpetas de Google Drive lista."
-        )
-
+        st.success("☁️ Estructura de carpetas de Google Drive lista.")
     else:
         st.error(
             "No fue posible crear o localizar la estructura de carpetas "
@@ -603,27 +725,22 @@ if service:
 
     if not excel_id:
         st.warning("⚠️ No se encontró la base de datos en Google Drive.")
-        st.info(
-            "Sube tu archivo Excel para vincularlo por primera vez:"
-        )
+        st.info("Sube tu archivo Excel para vincularlo por primera vez:")
 
         archivo_excel_nuevo = st.file_uploader(
             "Selecciona 'Base_de_Datos_Probatorios_y_CV.xlsx':",
             type=["xlsx"],
+            key="excel_inicial",
         )
 
         if archivo_excel_nuevo is not None:
-            with st.spinner(
-                "Subiendo Excel a Google Drive..."
-            ):
+            with st.spinner("Subiendo Excel a Google Drive..."):
                 file_metadata = {
                     "name": "Base_de_Datos_Probatorios_y_CV.xlsx"
                 }
 
                 media = MediaIoBaseUpload(
-                    io.BytesIO(
-                        archivo_excel_nuevo.getvalue()
-                    ),
+                    io.BytesIO(archivo_excel_nuevo.getvalue()),
                     mimetype=(
                         "application/vnd.openxmlformats-officedocument."
                         "spreadsheetml.sheet"
@@ -636,20 +753,42 @@ if service:
                     fields="id",
                 ).execute()
 
-                st.success(
-                    "¡Base de datos vinculada con éxito!"
-                )
-
+                st.success("¡Base de datos vinculada con éxito!")
                 st.rerun()
 
     else:
         # Cargar DataFrame en vivo desde Drive
         df = cargar_datos_drive(service, excel_id)
 
-        # 3 PESTAÑAS PRINCIPALES
-        tab_consulta, tab_registro, tab_cv_word = st.tabs(
+        # ------------------------------------------------
+        # ASEGURAR COLUMNAS NECESARIAS
+        # ------------------------------------------------
+        columnas_base = [
+            "ID",
+            "Año",
+            "Fecha",
+            "Categoría_CV",
+            "Rol_Participación",
+            "Título_Actividad_o_Publicación",
+            "Institución_Organización",
+            "Lugar_Sede",
+            "Nombre_Archivo_PDF",
+            "Enlace_Drive_Probatorio",
+            "ID_Drive_Probatorio",
+            "Estado_Probatorio",
+            "Incluir_en_CV",
+            "Notas_Observaciones",
+        ]
+
+        for columna in columnas_base:
+            if columna not in df.columns:
+                df[columna] = ""
+
+        # 4 PESTAÑAS PRINCIPALES
+        tab_consulta, tab_edicion, tab_registro, tab_cv_word = st.tabs(
             [
-                "🔍 Buscar y Consultar Probatorios",
+                "🔍 Buscar y Consultar",
+                "✏️ Editar / Eliminar",
                 "➕ Registrar Nueva Actividad",
                 "📄 Generar CV en Word",
             ]
@@ -659,9 +798,7 @@ if service:
         # PESTAÑA 1: BUSCADOR Y CONSULTA
         # ------------------------------------------------
         with tab_consulta:
-            st.subheader(
-                "Buscador de Actividades y Documentos"
-            )
+            st.subheader("Buscador de Actividades y Documentos")
 
             st.markdown("##### 🎯 Filtros de Búsqueda")
 
@@ -675,15 +812,15 @@ if service:
 
             with col_f1:
                 if "Año" in df.columns:
+                    anios_series = pd.to_numeric(
+                        df["Año"],
+                        errors="coerce",
+                    ).dropna()
+
                     anios_disponibles = (
                         ["Todos"]
                         + sorted(
-                            list(
-                                df["Año"]
-                                .dropna()
-                                .astype(int)
-                                .unique()
-                            ),
+                            anios_series.astype(int).unique().tolist(),
                             reverse=True,
                         )
                     )
@@ -693,25 +830,31 @@ if service:
                 filtro_anio = st.selectbox(
                     "Filtrar por Año",
                     anios_disponibles,
+                    key="filtro_anio_consulta",
                 )
 
             with col_f2:
                 filtro_categoria = st.selectbox(
                     "Filtrar por Categoría",
                     ["Todas"] + CATEGORIAS,
+                    key="filtro_categoria_consulta",
                 )
 
             with col_f3:
                 filtro_texto = st.text_input(
                     "🔍 Buscar por palabra clave",
                     placeholder="Ej. Congreso, Comisión, Libro...",
+                    key="filtro_texto_consulta",
                 )
 
             df_filtrado = df.copy()
 
             if filtro_anio != "Todos":
                 df_filtrado = df_filtrado[
-                    df_filtrado["Año"] == int(filtro_anio)
+                    pd.to_numeric(
+                        df_filtrado["Año"],
+                        errors="coerce",
+                    ) == int(filtro_anio)
                 ]
 
             if (
@@ -729,6 +872,7 @@ if service:
                         filtro_texto,
                         case=False,
                         na=False,
+                        regex=False,
                     )
                     .any(),
                     axis=1,
@@ -746,27 +890,708 @@ if service:
             col_config = {}
 
             if "Enlace_Drive_Probatorio" in df_filtrado.columns:
-                col_config[
-                    "Enlace_Drive_Probatorio"
-                ] = st.column_config.LinkColumn(
-                    "Enlace Drive Probatorio"
+                col_config["Enlace_Drive_Probatorio"] = (
+                    st.column_config.LinkColumn(
+                        "Enlace Drive Probatorio"
+                    )
                 )
 
             elif "Enlace_Probatorio" in df_filtrado.columns:
-                col_config[
-                    "Enlace_Probatorio"
-                ] = st.column_config.LinkColumn(
-                    "Enlace Drive Probatorio"
+                col_config["Enlace_Probatorio"] = (
+                    st.column_config.LinkColumn(
+                        "Enlace Drive Probatorio"
+                    )
                 )
 
             st.dataframe(
                 df_filtrado,
                 use_container_width=True,
                 column_config=col_config,
+                hide_index=True,
             )
 
         # ------------------------------------------------
-        # PESTAÑA 2: CAPTURA DE NUEVAS ACTIVIDADES
+        # PESTAÑA 2: EDITAR / ELIMINAR
+        # ------------------------------------------------
+        with tab_edicion:
+            st.subheader("✏️ Editar, completar o eliminar registros")
+
+            if df.empty:
+                st.info("No hay registros en la base de datos.")
+            else:
+                st.info(
+                    "Aquí puedes corregir información, agregar un probatorio "
+                    "que faltó al momento del registro, reemplazar un archivo "
+                    "existente o eliminar completamente un registro."
+                )
+
+                # Filtros específicos para encontrar rápidamente el registro.
+                col_e1, col_e2 = st.columns(2)
+
+                with col_e1:
+                    filtro_edicion = st.text_input(
+                        "🔎 Buscar registro",
+                        placeholder="ID, título, institución...",
+                        key="filtro_edicion",
+                    )
+
+                with col_e2:
+                    categorias_edicion = ["Todas"] + CATEGORIAS
+                    filtro_cat_edicion = st.selectbox(
+                        "Categoría",
+                        categorias_edicion,
+                        key="filtro_cat_edicion",
+                    )
+
+                df_seleccion = df.copy()
+
+                if filtro_edicion:
+                    mask_edicion = df_seleccion.apply(
+                        lambda row: row.astype(str)
+                        .str.contains(
+                            filtro_edicion,
+                            case=False,
+                            na=False,
+                            regex=False,
+                        )
+                        .any(),
+                        axis=1,
+                    )
+                    df_seleccion = df_seleccion[mask_edicion]
+
+                if filtro_cat_edicion != "Todas":
+                    df_seleccion = df_seleccion[
+                        df_seleccion["Categoría_CV"] == filtro_cat_edicion
+                    ]
+
+                if df_seleccion.empty:
+                    st.warning("No se encontraron registros con esos filtros.")
+                else:
+                    def etiqueta_registro(indice):
+                        fila = df.loc[indice]
+                        registro_id = str(valor_fila(fila, "ID", indice))
+                        titulo_registro = str(
+                            valor_fila(
+                                fila,
+                                "Título_Actividad_o_Publicación",
+                                "Sin título",
+                            )
+                        )
+
+                        if len(titulo_registro) > 90:
+                            titulo_registro = titulo_registro[:87] + "..."
+
+                        return f"{registro_id} — {titulo_registro}"
+
+                    indices_disponibles = df_seleccion.index.tolist()
+
+                    indice_seleccionado = st.selectbox(
+                        "Selecciona el registro que quieres administrar",
+                        indices_disponibles,
+                        format_func=etiqueta_registro,
+                        key="registro_seleccionado",
+                    )
+
+                    fila_actual = df.loc[indice_seleccionado].copy()
+
+                    st.markdown("---")
+
+                    col_info1, col_info2, col_info3 = st.columns(3)
+
+                    with col_info1:
+                        st.metric(
+                            "ID",
+                            str(valor_fila(fila_actual, "ID", "Sin ID")),
+                        )
+
+                    with col_info2:
+                        archivo_actual = str(
+                            valor_fila(
+                                fila_actual,
+                                "Nombre_Archivo_PDF",
+                                "Sin_PDF",
+                            )
+                        )
+                        tiene_probatorio = (
+                            archivo_actual not in ("", "Sin_PDF", "nan")
+                        )
+                        st.metric(
+                            "Probatorio",
+                            "📎 Sí" if tiene_probatorio else "⚠️ Falta",
+                        )
+
+                    with col_info3:
+                        estado_actual = str(
+                            valor_fila(
+                                fila_actual,
+                                "Estado_Probatorio",
+                                "Sin estado",
+                            )
+                        )
+                        st.metric("Estado", estado_actual)
+
+                    enlace_actual = str(
+                        valor_fila(
+                            fila_actual,
+                            "Enlace_Drive_Probatorio",
+                            "",
+                        )
+                    )
+
+                    if (
+                        enlace_actual
+                        and enlace_actual not in ("Sin_Enlace", "nan")
+                    ):
+                        st.markdown(
+                            f"🔗 **[Abrir probatorio en Google Drive]({enlace_actual})**"
+                        )
+
+                    # ------------------------------
+                    # FORMULARIO DE EDICIÓN
+                    # ------------------------------
+                    st.markdown("### ✏️ Datos del registro")
+
+                    anio_actual_raw = valor_fila(
+                        fila_actual,
+                        "Año",
+                        2026,
+                    )
+
+                    try:
+                        anio_actual = int(float(anio_actual_raw))
+                    except Exception:
+                        anio_actual = 2026
+
+                    anios_formulario = sorted(
+                        set(
+                            [
+                                2026,
+                                2025,
+                                2024,
+                                2023,
+                                2022,
+                                2021,
+                                2020,
+                                anio_actual,
+                            ]
+                        ),
+                        reverse=True,
+                    )
+
+                    categoria_actual = str(
+                        valor_fila(
+                            fila_actual,
+                            "Categoría_CV",
+                            CATEGORIAS[0],
+                        )
+                    )
+
+                    if categoria_actual not in CATEGORIAS:
+                        categoria_actual = CATEGORIAS[0]
+
+                    estado_actual_form = str(
+                        valor_fila(
+                            fila_actual,
+                            "Estado_Probatorio",
+                            "Pendiente de Escanear",
+                        )
+                    )
+
+                    estados_disponibles = [
+                        "Verificado / En Drive",
+                        "Pendiente de Escanear",
+                        "En Trámite",
+                    ]
+
+                    if estado_actual_form not in estados_disponibles:
+                        estado_actual_form = estados_disponibles[0]
+
+                    incluir_actual = str(
+                        valor_fila(
+                            fila_actual,
+                            "Incluir_en_CV",
+                            "No",
+                        )
+                    )
+
+                    if incluir_actual not in ["Sí", "No"]:
+                        incluir_actual = "No"
+
+                    with st.form("form_editar_registro"):
+                        col1, col2 = st.columns(2)
+
+                        with col1:
+                            st.text_input(
+                                "ID de Registro",
+                                value=str(
+                                    valor_fila(
+                                        fila_actual,
+                                        "ID",
+                                        "",
+                                    )
+                                ),
+                                disabled=True,
+                            )
+
+                            anio_editado = st.selectbox(
+                                "Año",
+                                anios_formulario,
+                                index=anios_formulario.index(anio_actual),
+                            )
+
+                            fecha_valor = valor_fila(
+                                fila_actual,
+                                "Fecha",
+                                "",
+                            )
+
+                            try:
+                                fecha_editada = pd.to_datetime(
+                                    fecha_valor
+                                ).date()
+                            except Exception:
+                                fecha_editada = pd.Timestamp.today().date()
+
+                            fecha_editada = st.date_input(
+                                "Fecha",
+                                value=fecha_editada,
+                            )
+
+                            categoria_editada = st.selectbox(
+                                "Categoría del CV",
+                                CATEGORIAS,
+                                index=CATEGORIAS.index(categoria_actual),
+                            )
+
+                            rol_editado = st.text_input(
+                                "Rol / Participación",
+                                value=str(
+                                    valor_fila(
+                                        fila_actual,
+                                        "Rol_Participación",
+                                        "",
+                                    )
+                                ),
+                            )
+
+                        with col2:
+                            titulo_editado = st.text_input(
+                                "Título de la Actividad o Publicación *",
+                                value=str(
+                                    valor_fila(
+                                        fila_actual,
+                                        "Título_Actividad_o_Publicación",
+                                        "",
+                                    )
+                                ),
+                            )
+
+                            institucion_editada = st.text_input(
+                                "Institución u Organización",
+                                value=str(
+                                    valor_fila(
+                                        fila_actual,
+                                        "Institución_Organización",
+                                        "",
+                                    )
+                                ),
+                            )
+
+                            lugar_editado = st.text_input(
+                                "Lugar / Sede",
+                                value=str(
+                                    valor_fila(
+                                        fila_actual,
+                                        "Lugar_Sede",
+                                        "",
+                                    )
+                                ),
+                            )
+
+                            estado_editado = st.selectbox(
+                                "Estado del Probatorio",
+                                estados_disponibles,
+                                index=estados_disponibles.index(
+                                    estado_actual_form
+                                ),
+                            )
+
+                            incluir_editado = st.radio(
+                                "¿Incluir en el CV?",
+                                ["Sí", "No"],
+                                index=0 if incluir_actual == "Sí" else 1,
+                                horizontal=True,
+                            )
+
+                        st.markdown("---")
+
+                        notas_editadas = st.text_area(
+                            "Notas / Observaciones de control interno",
+                            value=str(
+                                valor_fila(
+                                    fila_actual,
+                                    "Notas_Observaciones",
+                                    "",
+                                )
+                            ),
+                        )
+
+                        st.markdown("### 📎 Probatorio")
+
+                        st.write(
+                            f"Archivo actual: **{archivo_actual or 'Sin_PDF'}**"
+                        )
+
+                        nuevo_probatorio = st.file_uploader(
+                            "Sube un nuevo probatorio "
+                            "(déjalo vacío si no quieres cambiarlo)",
+                            type=[
+                                "pdf",
+                                "png",
+                                "jpg",
+                                "jpeg",
+                            ],
+                            key=f"uploader_edicion_{indice_seleccionado}",
+                        )
+
+                        reemplazar_probatorio = st.checkbox(
+                            "Reemplazar el probatorio actual por el archivo nuevo",
+                            value=False,
+                            disabled=not tiene_probatorio,
+                        )
+
+                        guardar_cambios = st.form_submit_button(
+                            "💾 Guardar cambios",
+                            type="primary",
+                        )
+
+                    if guardar_cambios:
+                        if not titulo_editado.strip():
+                            st.error(
+                                "⚠️ El campo 'Título de la Actividad' "
+                                "es obligatorio."
+                            )
+                        elif nuevo_probatorio is not None and (
+                            tiene_probatorio and not reemplazar_probatorio
+                        ):
+                            st.warning(
+                                "Has seleccionado un nuevo archivo, pero el "
+                                "registro ya tiene un probatorio. Marca "
+                                "'Reemplazar el probatorio actual' si deseas "
+                                "sustituirlo."
+                            )
+                        else:
+                            with st.spinner(
+                                "💾 Actualizando registro y sincronizando "
+                                "Google Drive..."
+                            ):
+                                archivo_drive_id_actual = str(
+                                    valor_fila(
+                                        fila_actual,
+                                        "ID_Drive_Probatorio",
+                                        "",
+                                    )
+                                ).strip()
+
+                                archivo_nombre_actual = str(
+                                    valor_fila(
+                                        fila_actual,
+                                        "Nombre_Archivo_PDF",
+                                        "Sin_PDF",
+                                    )
+                                )
+
+                                enlace_drive_nuevo = str(
+                                    valor_fila(
+                                        fila_actual,
+                                        "Enlace_Drive_Probatorio",
+                                        "Sin_Enlace",
+                                    )
+                                )
+
+                                archivo_drive_id_nuevo = (
+                                    archivo_drive_id_actual
+                                )
+
+                                nombre_archivo_nuevo = (
+                                    archivo_nombre_actual
+                                )
+
+                                # ----------------------------------
+                                # SI HAY UN NUEVO ARCHIVO
+                                # ----------------------------------
+                                if nuevo_probatorio is not None:
+                                    extension_nueva = os.path.splitext(
+                                        nuevo_probatorio.name
+                                    )[1].lower()
+
+                                    nombre_archivo_nuevo = nombre_probatorio(
+                                        titulo_editado,
+                                        anio_editado,
+                                        categoria_editada,
+                                        extension_nueva,
+                                    )
+
+                                    carpeta_destino_nueva = (
+                                        obtener_carpeta_probatorio(
+                                            service,
+                                            estructura_drive,
+                                            anio_editado,
+                                            categoria_editada,
+                                        )
+                                    )
+
+                                    if not carpeta_destino_nueva:
+                                        st.error(
+                                            "No se pudo determinar la carpeta "
+                                            "de destino del nuevo probatorio."
+                                        )
+                                        st.stop()
+
+                                    resultado_nuevo = subir_a_google_drive(
+                                        service,
+                                        nombre_archivo_nuevo,
+                                        nuevo_probatorio.getvalue(),
+                                        carpeta_destino_nueva,
+                                    )
+
+                                    if not resultado_nuevo[0]:
+                                        st.error(
+                                            "No se pudo subir el nuevo "
+                                            "probatorio. El registro no fue "
+                                            "modificado."
+                                        )
+                                        st.stop()
+
+                                    enlace_drive_nuevo = (
+                                        resultado_nuevo[0]
+                                    )
+                                    archivo_drive_id_nuevo = (
+                                        resultado_nuevo[1] or ""
+                                    )
+
+                                    # El nuevo archivo ya está seguro en Drive.
+                                    # Ahora enviamos el anterior a la papelera.
+                                    if (
+                                        archivo_drive_id_actual
+                                        and archivo_drive_id_actual
+                                        != archivo_drive_id_nuevo
+                                    ):
+                                        eliminar_archivo_drive(
+                                            service,
+                                            archivo_drive_id_actual,
+                                        )
+
+                                # ----------------------------------
+                                # SI NO SE SUBIÓ ARCHIVO NUEVO,
+                                # PERO CAMBIÓ AÑO/CATEGORÍA
+                                # ----------------------------------
+                                elif archivo_drive_id_actual:
+                                    carpeta_destino_editada = (
+                                        obtener_carpeta_probatorio(
+                                            service,
+                                            estructura_drive,
+                                            anio_editado,
+                                            categoria_editada,
+                                        )
+                                    )
+
+                                    if carpeta_destino_editada:
+                                        mover_archivo_drive(
+                                            service,
+                                            archivo_drive_id_actual,
+                                            carpeta_destino_editada,
+                                        )
+
+                                    extension_existente = os.path.splitext(
+                                        archivo_nombre_actual
+                                    )[1].lower()
+
+                                    if not extension_existente:
+                                        extension_existente = ".pdf"
+
+                                    nombre_archivo_nuevo = nombre_probatorio(
+                                        titulo_editado,
+                                        anio_editado,
+                                        categoria_editada,
+                                        extension_existente,
+                                    )
+
+                                    if (
+                                        archivo_nombre_actual
+                                        and archivo_nombre_actual
+                                        != "Sin_PDF"
+                                    ):
+                                        renombrar_archivo_drive(
+                                            service,
+                                            archivo_drive_id_actual,
+                                            nombre_archivo_nuevo,
+                                        )
+
+                                # ----------------------------------
+                                # ACTUALIZAR LA FILA
+                                # ----------------------------------
+                                df_actualizado = df.copy()
+
+                                df_actualizado.at[
+                                    indice_seleccionado,
+                                    "Año",
+                                ] = anio_editado
+
+                                df_actualizado.at[
+                                    indice_seleccionado,
+                                    "Fecha",
+                                ] = str(fecha_editada)
+
+                                df_actualizado.at[
+                                    indice_seleccionado,
+                                    "Categoría_CV",
+                                ] = categoria_editada
+
+                                df_actualizado.at[
+                                    indice_seleccionado,
+                                    "Rol_Participación",
+                                ] = rol_editado
+
+                                df_actualizado.at[
+                                    indice_seleccionado,
+                                    "Título_Actividad_o_Publicación",
+                                ] = titulo_editado
+
+                                df_actualizado.at[
+                                    indice_seleccionado,
+                                    "Institución_Organización",
+                                ] = institucion_editada
+
+                                df_actualizado.at[
+                                    indice_seleccionado,
+                                    "Lugar_Sede",
+                                ] = lugar_editado
+
+                                df_actualizado.at[
+                                    indice_seleccionado,
+                                    "Nombre_Archivo_PDF",
+                                ] = nombre_archivo_nuevo
+
+                                df_actualizado.at[
+                                    indice_seleccionado,
+                                    "Enlace_Drive_Probatorio",
+                                ] = enlace_drive_nuevo
+
+                                df_actualizado.at[
+                                    indice_seleccionado,
+                                    "ID_Drive_Probatorio",
+                                ] = archivo_drive_id_nuevo
+
+                                # Si subió/reemplazó el archivo, lo marcamos
+                                # automáticamente como verificado.
+                                if nuevo_probatorio is not None:
+                                    df_actualizado.at[
+                                        indice_seleccionado,
+                                        "Estado_Probatorio",
+                                    ] = "Verificado / En Drive"
+                                else:
+                                    df_actualizado.at[
+                                        indice_seleccionado,
+                                        "Estado_Probatorio",
+                                    ] = estado_editado
+
+                                df_actualizado.at[
+                                    indice_seleccionado,
+                                    "Incluir_en_CV",
+                                ] = incluir_editado
+
+                                df_actualizado.at[
+                                    indice_seleccionado,
+                                    "Notas_Observaciones",
+                                ] = notas_editadas
+
+                                guardar_dataframe_drive(
+                                    service,
+                                    excel_id,
+                                    df_actualizado,
+                                )
+
+                            st.success(
+                                "✅ Registro actualizado correctamente."
+                            )
+
+                            if nuevo_probatorio is not None:
+                                st.success(
+                                    "📎 El nuevo probatorio fue subido y "
+                                    "el anterior fue enviado a la papelera."
+                                )
+
+                            st.rerun()
+
+                    # ------------------------------
+                    # ELIMINACIÓN
+                    # ------------------------------
+                    st.markdown("---")
+                    st.markdown("### 🗑️ Eliminar registro")
+
+                    st.warning(
+                        "⚠️ Esta operación elimina el registro de la base de "
+                        "datos. Si tiene un probatorio asociado, también se "
+                        "enviará ese archivo a la papelera de Google Drive."
+                    )
+
+                    confirmar_eliminacion = st.checkbox(
+                        "Confirmo que quiero eliminar este registro y su probatorio asociado.",
+                        key=f"confirmar_eliminacion_{indice_seleccionado}",
+                    )
+
+                    if st.button(
+                        "🗑️ Eliminar definitivamente",
+                        disabled=not confirmar_eliminacion,
+                        key=f"eliminar_{indice_seleccionado}",
+                    ):
+                        with st.spinner(
+                            "🗑️ Eliminando registro y sincronizando Drive..."
+                        ):
+                            archivo_id_eliminar = str(
+                                valor_fila(
+                                    fila_actual,
+                                    "ID_Drive_Probatorio",
+                                    "",
+                                )
+                            ).strip()
+
+                            eliminacion_drive_ok = True
+
+                            if archivo_id_eliminar:
+                                eliminacion_drive_ok = (
+                                    eliminar_archivo_drive(
+                                        service,
+                                        archivo_id_eliminar,
+                                    )
+                                )
+
+                            if not eliminacion_drive_ok:
+                                st.error(
+                                    "No se eliminó el registro del Excel "
+                                    "porque no fue posible gestionar el "
+                                    "probatorio en Google Drive."
+                                )
+                            else:
+                                df_actualizado = df.drop(
+                                    index=indice_seleccionado
+                                ).reset_index(drop=True)
+
+                                guardar_dataframe_drive(
+                                    service,
+                                    excel_id,
+                                    df_actualizado,
+                                )
+
+                                st.success(
+                                    "🗑️ Registro eliminado correctamente."
+                                )
+
+                                st.rerun()
+
+        # ------------------------------------------------
+        # PESTAÑA 3: CAPTURA DE NUEVAS ACTIVIDADES
         # ------------------------------------------------
         with tab_registro:
             st.subheader(
@@ -782,7 +1607,7 @@ if service:
                 with col1:
                     nuevo_id = st.text_input(
                         "ID de Registro",
-                        value=f"ACT-{len(df) + 1:03d}",
+                        value=siguiente_id_registro(df),
                     )
 
                     anio = st.selectbox(
@@ -840,9 +1665,7 @@ if service:
 
                 st.markdown("---")
 
-                st.subheader(
-                    "📎 Documento Probatorio"
-                )
+                st.subheader("📎 Documento Probatorio")
 
                 archivo_pdf = st.file_uploader(
                     "Sube el documento probatorio",
@@ -852,6 +1675,7 @@ if service:
                         "jpg",
                         "jpeg",
                     ],
+                    key="uploader_nuevo_registro",
                 )
 
                 notas = st.text_area(
@@ -859,17 +1683,16 @@ if service:
                 )
 
                 boton_guardar = st.form_submit_button(
-                    "💾 Guardar Registro y Subir Documento"
+                    "💾 Guardar Registro y Subir Documento",
+                    type="primary",
                 )
 
             if boton_guardar:
-                if not titulo:
+                if not titulo.strip():
                     st.error(
-                        "⚠️ El campo "
-                        "'Título de la Actividad' "
+                        "⚠️ El campo 'Título de la Actividad' "
                         "es obligatorio."
                     )
-
                 else:
                     with st.spinner(
                         "📁 Guardando probatorio en su carpeta "
@@ -880,31 +1703,15 @@ if service:
                         archivo_drive_id = ""
 
                         if archivo_pdf is not None:
-                            bytes_archivo = (
-                                archivo_pdf.getvalue()
-                            )
-
                             extension = os.path.splitext(
                                 archivo_pdf.name
                             )[1].lower()
 
-                            titulo_limpio = "".join(
-                                x
-                                for x in titulo
-                                if x.isalnum()
-                                or x in " _-"
-                            ).strip()
-
-                            titulo_limpio = (
-                                titulo_limpio[:80]
-                                or "Sin_Titulo"
-                            )
-
-                            nombre_archivo_guardado = (
-                                f"{anio}_"
-                                f"{categoria.replace(' ', '_')}_"
-                                f"{titulo_limpio}"
-                                f"{extension}"
+                            nombre_archivo_guardado = nombre_probatorio(
+                                titulo,
+                                anio,
+                                categoria,
+                                extension,
                             )
 
                             carpeta_destino = (
@@ -926,7 +1733,7 @@ if service:
                             resultado = subir_a_google_drive(
                                 service,
                                 nombre_archivo_guardado,
-                                bytes_archivo,
+                                archivo_pdf.getvalue(),
                                 carpeta_destino,
                             )
 
@@ -935,31 +1742,40 @@ if service:
                                 archivo_drive_id = (
                                     resultado[1] or ""
                                 )
+                            else:
+                                st.error(
+                                    "No se pudo subir el probatorio. "
+                                    "El registro no fue guardado."
+                                )
+                                st.stop()
 
                         nueva_fila = {
-                            "ID": nuevo_id,
+                            "ID": nuevo_id.strip(),
                             "Año": anio,
                             "Fecha": str(fecha),
                             "Categoría_CV": categoria,
                             "Rol_Participación": rol,
-                            "Título_Actividad_o_Publicación": titulo,
+                            "Título_Actividad_o_Publicación": titulo.strip(),
                             "Institución_Organización": institucion,
                             "Lugar_Sede": lugar,
-                            "Nombre_Archivo_PDF": (
-                                nombre_archivo_guardado
-                            ),
+                            "Nombre_Archivo_PDF": nombre_archivo_guardado,
                             "Enlace_Drive_Probatorio": enlace_drive,
                             "ID_Drive_Probatorio": archivo_drive_id,
-                            "Estado_Probatorio": estado,
+                            "Estado_Probatorio": (
+                                "Verificado / En Drive"
+                                if archivo_pdf is not None
+                                else estado
+                            ),
                             "Incluir_en_CV": incluir,
                             "Notas_Observaciones": notas,
                         }
 
-                        # Mantener compatibilidad con columnas existentes
+                        # Mantener compatibilidad con columnas existentes.
                         for col in df.columns:
                             if col not in nueva_fila:
                                 nueva_fila[col] = ""
 
+                        # Si el Excel tiene columnas adicionales, conservarlas.
                         df_actualizado = pd.concat(
                             [
                                 df,
@@ -968,7 +1784,7 @@ if service:
                             ignore_index=True,
                         )
 
-                        actualizar_excel_drive(
+                        guardar_dataframe_drive(
                             service,
                             excel_id,
                             df_actualizado,
@@ -990,7 +1806,7 @@ if service:
                         st.rerun()
 
         # ------------------------------------------------
-        # PESTAÑA 3: GENERADOR DE CV EN WORD
+        # PESTAÑA 4: GENERADOR DE CV EN WORD
         # ------------------------------------------------
         with tab_cv_word:
             st.subheader(
@@ -1041,7 +1857,6 @@ if service:
                             "wordprocessingml.document"
                         ),
                     )
-
                 else:
                     st.warning(
                         "No hay registros marcados con "
@@ -1057,7 +1872,9 @@ if service:
             columnas_preview = [
                 c
                 for c in [
+                    "ID",
                     "Año",
+                    "Fecha",
                     "Categoría_CV",
                     "Categoría",
                     "Título_Actividad_o_Publicación",
@@ -1072,4 +1889,5 @@ if service:
             st.dataframe(
                 df_cv_aprobados[columnas_preview],
                 use_container_width=True,
+                hide_index=True,
             )
