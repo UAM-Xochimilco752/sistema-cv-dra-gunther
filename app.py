@@ -80,6 +80,7 @@ COLUMNAS_ACTIVIDADES = [
     "Lugar",
     "Estado_Probatorio",
     "Incluir_en_CV",
+    "Detalle_CV",
     "Notas_Observaciones",
 ]
 
@@ -641,7 +642,8 @@ def construir_excel_bytes(df_actividades, df_probatorios):
                 "H": 28,
                 "I": 24,
                 "J": 16,
-                "K": 55,
+                "K": 70,
+                "L": 55,
             },
         )
 
@@ -1326,6 +1328,7 @@ def crear_cv_word(df_actividades):
                 institucion = str(valor_fila(fila, "Institución", "")).strip()
                 lugar = str(valor_fila(fila, "Lugar", "")).strip()
                 fecha = formatear_fecha(valor_fila(fila, "Fecha", ""))
+                detalle_cv = str(valor_fila(fila, "Detalle_CV", "")).strip()
 
                 if not titulo:
                     continue
@@ -1346,6 +1349,17 @@ def crear_cv_word(df_actividades):
 
                 if detalles:
                     p_item.add_run(". " + ", ".join(detalles) + ".")
+
+                # Información complementaria destinada expresamente al CV.
+                # Las notas internas NO se incorporan automáticamente al documento.
+                if detalle_cv:
+                    p_detalle = doc.add_paragraph()
+                    p_detalle.paragraph_format.left_indent = Inches(0.25)
+                    p_detalle.paragraph_format.space_before = Pt(0)
+                    p_detalle.paragraph_format.space_after = Pt(5)
+                    run_detalle = p_detalle.add_run(detalle_cv)
+                    run_detalle.italic = True
+                    run_detalle.font.size = Pt(10.5)
 
     buffer = io.BytesIO()
     doc.save(buffer)
@@ -1425,11 +1439,54 @@ if service:
     )
 
     if arquitectura_normalizada:
+        columnas_actividades_existentes = set(hojas[HOJA_ACTIVIDADES].columns)
+
         df_actividades = preparar_actividades(hojas[HOJA_ACTIVIDADES])
         df_probatorios = preparar_probatorios(
             hojas[HOJA_PROBATORIOS],
             service=service,
         )
+
+        # Migración menor y controlada para incorporar el campo Detalle_CV
+        # a una base que ya usa la arquitectura Actividades + Probatorios.
+        if "Detalle_CV" not in columnas_actividades_existentes:
+            st.warning(
+                "⚠️ La base ya usa Actividades + Probatorios, pero todavía no tiene "
+                "el nuevo campo **Detalle_CV**. Este campo separa la información que "
+                "sí debe aparecer en el CV de las Notas / Observaciones de uso interno."
+            )
+
+            if st.button(
+                "🛡️ Crear respaldo y agregar campo Detalle_CV",
+                type="primary",
+            ):
+                with st.spinner("Creando respaldo y actualizando la estructura..."):
+                    respaldo = crear_respaldo_excel(service, excel_id)
+
+                    if not respaldo:
+                        st.error(
+                            "La actualización se canceló porque no se pudo crear el respaldo."
+                        )
+                        st.stop()
+
+                    ok = actualizar_excel_drive(
+                        service,
+                        excel_id,
+                        df_actividades,
+                        df_probatorios,
+                    )
+
+                if ok:
+                    st.success(
+                        f"✅ Campo Detalle_CV agregado. Respaldo creado: {respaldo['name']}"
+                    )
+                    st.rerun()
+
+            st.info(
+                "Esta actualización no copia automáticamente las Notas / Observaciones "
+                "al nuevo campo, para evitar que información interna termine en el CV."
+            )
+            st.stop()
 
     else:
         if HOJA_LEGACY in hojas:
@@ -1835,9 +1892,22 @@ if service:
                         ),
                     )
 
+                    detalle_cv = st.text_area(
+                        "Información complementaria para CV",
+                        value=str(valor_fila(fila, "Detalle_CV", "")),
+                        help=(
+                            "Texto opcional que sí aparecerá en el CV generado. "
+                            "Úsalo para datos curriculares relevantes que no tienen un campo propio, "
+                            "como duración, nombre del evento general, volumen, número o contexto de la participación."
+                        ),
+                    )
+
                     notas = st.text_area(
                         "Notas / Observaciones",
                         value=str(valor_fila(fila, "Notas_Observaciones", "")),
+                        help=(
+                            "Uso interno de la base. Estas notas NO se incorporan automáticamente al CV."
+                        ),
                     )
 
                     st.markdown("### 📎 Probatorios actuales")
@@ -2058,6 +2128,7 @@ if service:
                             "Verificado / En Drive" if tiene_probatorios else estado
                         )
                         df_act_nuevo.at[indice_act, "Incluir_en_CV"] = incluir
+                        df_act_nuevo.at[indice_act, "Detalle_CV"] = detalle_cv
                         df_act_nuevo.at[indice_act, "Notas_Observaciones"] = notas
 
                         ok = actualizar_excel_drive(
@@ -2175,7 +2246,20 @@ if service:
                 accept_multiple_files=True,
             )
 
-            notas = st.text_area("Notas / Observaciones")
+            detalle_cv = st.text_area(
+                "Información complementaria para CV",
+                help=(
+                    "Texto opcional que sí aparecerá en el CV generado. "
+                    "Úsalo para información curricular complementaria, no para notas internas."
+                ),
+            )
+
+            notas = st.text_area(
+                "Notas / Observaciones",
+                help=(
+                    "Uso interno de la base. Estas notas NO se incorporan automáticamente al CV."
+                ),
+            )
 
             guardar_nueva = st.form_submit_button(
                 "💾 Guardar actividad",
@@ -2230,6 +2314,7 @@ if service:
                         "Verificado / En Drive" if filas_probatorios else estado
                     ),
                     "Incluir_en_CV": incluir,
+                    "Detalle_CV": detalle_cv,
                     "Notas_Observaciones": notas,
                 }
 
@@ -2441,6 +2526,7 @@ if service:
                         "Rol",
                         "Título",
                         "Institución",
+                        "Detalle_CV",
                     ]
                 ],
                 use_container_width=True,
